@@ -1,0 +1,17 @@
+spring:
+  data:
+    mongodb:
+      # Adicionado o usuário, senha e o parâmetro de autenticação
+      uri: mongodb://admin:password123@localhost:27017/algomesti_db?authSource=admin
+  rabbitmq:
+    host: localhost
+    port: 5672
+    # Adicionadas as credenciais do RabbitMQ
+    username: admin
+    password: password123
+
+minio:
+  url: http://localhost:9000
+  accessKey: admin
+  secretKey: password123
+  bucket: evidencias

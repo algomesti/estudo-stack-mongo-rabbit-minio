@@ -1,0 +1,9 @@
+com/algomesti/pocminio/consumer/AlertListener.class
+com/algomesti/pocminio/AlgomestiPocApplication.class
+com/algomesti/pocminio/controller/VideoController.class
+com/algomesti/pocminio/model/AlertMessage.class
+com/algomesti/pocminio/config/MinioConfig.class
+com/algomesti/pocminio/repository/AlertRepository.class
+com/algomesti/pocminio/model/AlertEntity.class
+com/algomesti/pocminio/config/RabbitConfig.class
+com/algomesti/pocminio/model/AlertEntity$AlertEntityBuilder.class
