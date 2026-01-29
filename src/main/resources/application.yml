@@ -6,7 +6,6 @@ spring:
   rabbitmq:
     host: localhost
     port: 5672
-    # Adicionadas as credenciais do RabbitMQ
     username: admin
     password: password123
 
