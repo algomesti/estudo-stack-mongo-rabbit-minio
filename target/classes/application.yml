@@ -14,3 +14,13 @@ minio:
   accessKey: admin
   secretKey: password123
   bucket: evidencias
+
+cloud:
+  sync:
+    url: http://localhost:9080/alerts/sync
+
+logging:
+  level:
+    org:
+      springframework:
+        web=DEBUG:

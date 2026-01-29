@@ -2,24 +2,27 @@ package com.algomesti.pocminio.job;
 
 import com.algomesti.pocminio.model.AlertEntity;
 import com.algomesti.pocminio.repository.AlertRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
+import io.minio.StatObjectArgs;
+import io.minio.StatObjectResponse;
+import io.tus.java.client.*;
 import lombok.extern.slf4j.Slf4j;
 import org.quartz.DisallowConcurrentExecution;
 import org.quartz.JobExecutionContext;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.InputStreamResource;
-import org.springframework.http.*;
 import org.springframework.scheduling.quartz.QuartzJobBean;
 import org.springframework.stereotype.Component;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
-import org.springframework.web.client.RestTemplate;
+
+import io.tus.java.client.ProtocolException;
 
 import java.io.InputStream;
+import java.net.URL;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.io.IOException; // Esta é a que está faltando e causando o erro vermelho
 
 @Slf4j
 @Component
@@ -27,79 +30,94 @@ import java.util.List;
 public class CloudSyncJob extends QuartzJobBean {
 
     @Autowired private AlertRepository repository;
-    @Autowired private MinioClient minioClient; // Injetamos o cliente local
+    @Autowired private MinioClient minioLocal;
 
-    private final RestTemplate restTemplate = new RestTemplate();
-    private final ObjectMapper objectMapper = new ObjectMapper()
-            .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
-
-    @Value("${minio.bucket:evidencias}")
-    private String localBucket;
+    @Value("${cloud.sync.url:http://localhost:9080/alerts/sync/}")
+    private String cloudUrl;
 
     @Override
     protected void executeInternal(JobExecutionContext context) {
         List<AlertEntity> pendentes = repository.findByStatus("PENDENTE");
         if (pendentes.isEmpty()) return;
 
-        log.info("Quartz: Sincronizando {} alertas do MinIO Local para a Nuvem...", pendentes.size());
+        try {
+            TusClient client = new TusClient();
+            URL creationUrl = new URL(cloudUrl);
+            client.setUploadCreationURL(creationUrl);
 
-        for (AlertEntity alert : pendentes) {
-            try {
-                enviarParaNuvem(alert);
-                alert.setStatus("SINCRONIZADO");
-                repository.save(alert);
-                log.info(">>> SUCESSO: Alerta {} sincronizado na Nuvem!", alert.getId());
-            } catch (Exception e) {
-                log.error(">>> FALHA na sincronização do alerta {}: {}", alert.getId(), e.getMessage());
-                break;
+            log.info(">>> [TUS] Tentando conectar em: {}", creationUrl.toString());
+
+            // Store em memória para manter a URL de upload durante a execução
+            client.enableResuming(new TusURLMemoryStore());
+
+            for (AlertEntity alert : pendentes) {
+                log.info(">>> [TUS] Iniciando sincronismo: {}", alert.getLocalPath());
+                processUpload(client, alert);
             }
+        } catch (Exception e) {
+            log.error(">>> [TUS] Erro crítico no motor de sincronismo: {}", e.getMessage());
         }
     }
 
-    private void enviarParaNuvem(AlertEntity alert) throws Exception {
-        String cloudUrl = "http://localhost:9080/alerts/sync";
-        String objectName = alert.getLocalPath(); // Agora é o nome do objeto no MinIO
+    private void processUpload(TusClient client, AlertEntity alert) throws Exception {
+        // 1. Obter o tamanho real do arquivo no MinIO Local
+        StatObjectResponse stat = minioLocal.statObject(
+                StatObjectArgs.builder()
+                        .bucket("evidencias")
+                        .object(alert.getLocalPath())
+                        .build());
 
-        // 1. "Pescar" o arquivo no MinIO Local
-        InputStream stream = minioClient.getObject(
+        // 2. Abrir o Stream
+        try (InputStream is = minioLocal.getObject(
                 GetObjectArgs.builder()
-                        .bucket(localBucket)
-                        .object(objectName)
-                        .build()
-        );
+                        .bucket("evidencias")
+                        .object(alert.getLocalPath())
+                        .build())) {
 
-        // 2. Montar a requisição Multipart
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+            // 3. Configurar o Upload
+            TusUpload upload = new TusUpload();
+            upload.setInputStream(is);
+            upload.setSize(stat.size());
 
-        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            Map<String, String> metadata = new HashMap<>();
+            metadata.put("filename", alert.getLocalPath());
+            metadata.put("alertId", alert.getId());
+            upload.setMetadata(metadata);
 
-        // Parte JSON
-        HttpHeaders jsonHeaders = new HttpHeaders();
-        jsonHeaders.setContentType(MediaType.APPLICATION_JSON);
-        body.add("alert", new HttpEntity<>(objectMapper.writeValueAsString(alert), jsonHeaders));
+            // 4. Executor com retentativa nativa
+            TusExecutor executor = new TusExecutor() {
+                @Override
+                protected void makeAttempt() throws ProtocolException, IOException { // AJUSTADO AQUI
+                    try {
+                        TusUploader uploader = client.resumeOrCreateUpload(upload);
+                        uploader.setChunkSize(256 * 1024); // Chunks de 1MB
 
-        // Parte Arquivo (Usando InputStreamResource com o stream do MinIO)
-        body.add("file", new InputStreamResource(stream) {
-            @Override
-            public String getFilename() {
-                return objectName; // O Spring precisa de um nome para o multipart
+                        log.info(">>> [NAVIO] Iniciando envio em pedaços de {} bytes", uploader.getChunkSize());
+
+                        while (uploader.uploadChunk() > -1) {
+                            long totalSend = uploader.getOffset();
+                            long sizeTotal = upload.getSize();
+                            double progress = (totalSend * 100.0) / sizeTotal;
+
+                            log.info(">>> [NAVIO] Enviando Chunk... [ {} / {} bytes ] - {}%",
+                                    totalSend, sizeTotal, String.format("%.2f", progress));
+                        }
+
+                        uploader.finish();
+                    } catch (Exception e) {
+                        // Se houver erro interno de lógica, precisamos converter
+                        // ou relançar para o executor entender a falha na tentativa
+                        log.error(">>> Erro durante tentativa de upload: {}", e.getMessage());
+                        throw e;
+                    }
+                }
+            };
+
+            if (executor.makeAttempts()) {
+                alert.setStatus("SINCRONIZADO");
+                repository.save(alert);
+                log.info(">>> [TUS] Sucesso total: {}", alert.getLocalPath());
             }
-            @Override
-            public long contentLength() {
-                return -1; // Stream do MinIO não sabe o tamanho de antemão facilmente
-            }
-        });
-
-        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
-
-        // 3. Postar para a Nuvem
-        ResponseEntity<String> response = restTemplate.postForEntity(cloudUrl, requestEntity, String.class);
-
-        if (response.getStatusCode() != HttpStatus.OK) {
-            throw new RuntimeException("Nuvem recusou o arquivo: " + response.getStatusCode());
         }
-
-        stream.close(); // Fechar o duto de dados
     }
 }

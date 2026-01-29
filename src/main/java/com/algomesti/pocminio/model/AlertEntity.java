@@ -13,20 +13,24 @@ import java.time.Instant;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Document(collection = "alerts")
 @Data
-@Builder // Adicionado para resolver o erro do builder()
-@NoArgsConstructor // Necessário para o Jackson e MongoDB
-@AllArgsConstructor // Necessário para o Builder
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class AlertEntity {
     @Id
     private String id;
     private String cameraId;
     private String type;
     private String localPath;
-    private String videoKey; // Adicionado para resolver o erro do setVideoKey
+    private String videoKey;
+
+    // --- ADICIONE ESTA LINHA ---
+    private Long fileSize; // Tamanho em bytes para controle do TUS
+    // ---------------------------
 
     @Builder.Default
     private String status = "PENDENTE";
 
     @Builder.Default
-    private Instant createdAt = Instant.now(); // Mude para Instant
+    private Instant createdAt = Instant.now();
 }
